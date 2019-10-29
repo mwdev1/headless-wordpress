@@ -1,19 +1,19 @@
 version: 0.1
 stack:
-  name: headless-wp-ecs # Note: Update this with your stack name
+  name: outtakemag-wp-ecs # Note: Update this with your stack name
   template:
     file: ecs.stack.yml
-    bucket: cim-stack-artifacts # Note: Update this with your bucket name.  Stacks are uploaded here prior to deployment.'
+    bucket: outtakemag-content # Note: Update this with your bucket name.  Stacks are uploaded here prior to deployment.'
 
   #
   # Define stack input parameters.
   #
   parameters:
-    KeyPairName: 'bluefineng'
-    VPCStack: 'headless-wp-vpc'
-    TLD: 'bluefineng.com'
-    Domain: 'cms.bluefineng.com'
-    SSL: 'arn:aws:acm:us-east-1:132093761664:certificate/7a872cf1-4845-46f5-9a05-6183bafad0c2'
+    KeyPairName: 'MyKeyPair'
+    VPCStack: 'outtakemag-wp-vpc'
+   # TLD: 'bluefineng.com'
+   # Domain: 'cms.bluefineng.com'
+   # SSL: 'arn:aws:acm:us-east-1:132093761664:certificate/7a872cf1-4845-46f5-9a05-6183bafad0c2'
 
   #
   # Define stack capabilities required.
@@ -25,4 +25,4 @@ stack:
   # Define global tags.
   #
   tags:
-    app: 'headless-wp'
+    app: 'outtakemag-wp'

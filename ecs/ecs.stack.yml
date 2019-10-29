@@ -21,7 +21,7 @@ Parameters:
 
   MaxSize:
     Type: Number
-    Default: '2'
+    Default: '1'
     Description: Maximum number of instances that can be launched in your ECS cluster.
 
   TargetCPUReservation:
@@ -59,6 +59,11 @@ Parameters:
     Type: String
     Description: SSL Arn for your Domain
     Default: ''
+    
+  ECSAMI:
+    Description: ECS-Optimized AMI ID
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux/recommended/image_id
 
 Conditions:
   UseCustomDomain: !And
@@ -78,7 +83,7 @@ Mappings:
   # You can find the latest available on this page of our documentation:
   # http://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-optimized_AMI.html
   # (note the AMI identifier is region specific)
-
+    
   AWSRegionToAMI:
     us-east-2:
       AMI: ami-64300001
@@ -248,6 +253,7 @@ Resources:
           Statement:
           - Effect: Allow
             Action:
+              - 'ec2:*'
               - 'ecs:CreateCluster'
               - 'ecs:DeregisterContainerInstance'
               - 'ecs:DiscoverPollEndpoint'
@@ -279,7 +285,8 @@ Resources:
   ECSLaunchConfiguration:
     Type: AWS::AutoScaling::LaunchConfiguration
     Properties:
-      ImageId: !FindInMap [AWSRegionToAMI, !Ref 'AWS::Region', AMI]
+      #ImageId: !FindInMap [AWSRegionToAMI, !Ref 'AWS::Region', AMI]
+      ImageId: !Ref ECSAMI
       SecurityGroups:
         - !Ref ECSHostSecurityGroup
       InstanceType: !Ref InstanceType
@@ -288,10 +295,58 @@ Resources:
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash -xe
+          yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm
+          yum install -y https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+          yum install -y aws-cfn-bootstrap hibagent 
+          /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource ECSLaunchConfiguration
+          #/usr/bin/enable-ec2-spot-hibernation
+
           echo ECS_CLUSTER=${ECSCluster} >> /etc/ecs/ecs.config
+          echo ECS_AVAILABLE_LOGGING_DRIVERS='["json-file","awslogs","syslog"]' >> /etc/ecs/ecs.config
+          echo ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE=true >> /etc/ecs/ecs.config
           yum install -y aws-cfn-bootstrap
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource ECSAutoScalingGroup --region ${AWS::Region}
-
+          #verify that the agent is running
+          #  until curl -s http://localhost:51678/v1/metadata 
+          until curl -s http://169.254.169.254/latest/meta-data/
+          do
+            sleep 1
+          done
+          #install the Docker volume plugin
+          docker plugin install rexray/ebs REXRAY_PREEMPT=true EBS_REGION=${AWS::Region} --grant-all-permissions 
+          #restart the ECS agent
+          stop ecs 
+          start ecs
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            yum:
+              collectd: []
+          files:
+            /etc/cfn/cfn-hup.conf:
+              mode: 000400
+              owner: root
+              group: root
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.ECSLaunchConfiguration.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource ECSLaunchConfiguration
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+                  
   ECSAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
@@ -306,49 +361,55 @@ Resources:
       DesiredCapacity: !Ref DesiredCapacity
     CreationPolicy:
       ResourceSignal:
-        Timeout: PT15M
+        Timeout: PT10M
     UpdatePolicy:
       AutoScalingReplacingUpdate:
         WillReplace: 'true'
       AutoScalingRollingUpdate:
         MinInstancesInService: '1'
         MaxBatchSize: '1'
-        PauseTime: PT15M
+        PauseTime: PT10M
         WaitOnResourceSignals: 'true'
+        SuspendProcesses:
+          - HealthCheck
+          - ReplaceUnhealthy
+          - AZRebalance
+          - AlarmNotification
+          - ScheduledActions
 
-  CPUReservationPolicy:
-    Type: AWS::AutoScaling::ScalingPolicy
-    Properties:
-      AdjustmentType: ChangeInCapacity
-      AutoScalingGroupName: !Ref ECSAutoScalingGroup
-      Cooldown: 300
-      PolicyType: TargetTrackingScaling
-      TargetTrackingConfiguration:
-        CustomizedMetricSpecification:
-          Dimensions:
-            - Name: ClusterName
-              Value: !Ref ECSCluster
-          MetricName: CPUReservation
-          Namespace: AWS/ECS
-          Statistic: Average
-        TargetValue: !Ref TargetCPUReservation
+#  CPUReservationPolicy:
+#    Type: AWS::AutoScaling::ScalingPolicy
+#    Properties:
+#      AdjustmentType: ChangeInCapacity
+#      AutoScalingGroupName: !Ref ECSAutoScalingGroup
+#      Cooldown: 300
+#      PolicyType: TargetTrackingScaling
+#      TargetTrackingConfiguration:
+#        CustomizedMetricSpecification:
+#          Dimensions:
+#            - Name: ClusterName
+#              Value: !Ref ECSCluster
+#          MetricName: CPUReservation
+#          Namespace: AWS/ECS
+#          Statistic: Average
+#        TargetValue: !Ref TargetCPUReservation
 
-  MemoryReservationPolicy:
-    Type: AWS::AutoScaling::ScalingPolicy
-    Properties:
-      AdjustmentType: ChangeInCapacity
-      AutoScalingGroupName: !Ref ECSAutoScalingGroup
-      Cooldown: 300
-      PolicyType: TargetTrackingScaling
-      TargetTrackingConfiguration:
-        CustomizedMetricSpecification:
-          Dimensions:
-            - Name: ClusterName
-              Value: !Ref ECSCluster
-          MetricName: MemoryReservation
-          Namespace: AWS/ECS
-          Statistic: Average
-        TargetValue: !Ref TargetMemoryReservation
+#  MemoryReservationPolicy:
+#    Type: AWS::AutoScaling::ScalingPolicy
+#    Properties:
+#      AdjustmentType: ChangeInCapacity
+#      AutoScalingGroupName: !Ref ECSAutoScalingGroup
+#      Cooldown: 300
+#      PolicyType: TargetTrackingScaling
+#      TargetTrackingConfiguration:
+#        CustomizedMetricSpecification:
+#          Dimensions:
+#            - Name: ClusterName
+#              Value: !Ref ECSCluster
+#          MetricName: MemoryReservation
+#          Namespace: AWS/ECS
+#          Statistic: Average
+#        TargetValue: !Ref TargetMemoryReservation
 
 Outputs:
   ECSCluster:

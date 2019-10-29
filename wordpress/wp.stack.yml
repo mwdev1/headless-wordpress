@@ -14,7 +14,7 @@ Parameters:
     Description: RDS Stack Name
   DesiredCount:
     Type: Number
-    Default: '2'
+    Default: '1'
     Description: Desired task count
   Path:
     Type: String
@@ -226,6 +226,9 @@ Resources:
               - Effect: Allow
                 Action:
                   - s3:*
+                  - ssm:GetParameters
+                  - secretsmanager:GetSecretValue
+                  - kms:Decrypt
                 Resource:
                   - !Sub 'arn:aws:s3:::${MediaBucket}'
                   - !Sub 'arn:aws:s3:::${MediaBucket}/*'
@@ -236,6 +239,7 @@ Resources:
       - CDN
       - MediaBucket
     Properties:
+      NetworkMode: host
       Family: !Ref AWS::StackName
       TaskRoleArn: !GetAtt TaskRole.Arn
       ContainerDefinitions:
@@ -247,7 +251,7 @@ Resources:
                 URL: { "Fn::ImportValue" : {"Fn::Sub": "${ECRStack}-Service1RepositoryUrl" } },
                 Version: !Ref Version
               }
-          Memory: 128
+          Memory: 900
           PortMappings:
             - ContainerPort: 80
           LogConfiguration:
@@ -260,15 +264,17 @@ Resources:
               Value: !Ref AWS::Region
             - Name: AWS_ACCOUNT_ID
               Value: !Ref AWS::AccountId
-            - Name: WORDPRESS_DB_HOST
+            - Name: DatabaseHostname
               Value:
                 Fn::ImportValue:
                   !Sub "${RDSStack}-RDSClusterEndpoint"
-            - Name: WORDPRESS_DB_USER
+            - Name: DatabaseName
+              Value: "wordpress"
+            - Name: DatabaseUsername
               Value:
                 Fn::ImportValue:
                   !Sub "${RDSStack}-DatabaseUsername"
-            - Name: WORDPRESS_DB_PASSWORD
+            - Name: DatabasePassword
               Value:
                 Fn::ImportValue:
                   !Sub "${RDSStack}-DatabasePassword"
@@ -276,17 +282,6 @@ Resources:
               Value: !Sub 
                 - |
                   define( 'AS3CF_AWS_USE_EC2_IAM_ROLE', true );
-                  define( 'AS3CF_SETTINGS', serialize( array(
-                    'bucket' => '${MediaBucket}',
-                    'copy-to-s3' => true,
-                    'serve-from-s3' => true,
-                    'domain' => 'cloudfront',
-                    'cloudfront' => '${DomainName}',
-                    'enable-object-prefix' => true,
-                    'object-prefix' => 'wp-content/uploads/',
-                    'force-https' => ${ForceHttps},
-                    'remove-local-file' => true
-                  ) ) );
                   define( 'WP_HOME', '${CMSUrl}' );
                   define( 'WP_SITEURL', '${CMSUrl}' );
                 - {
@@ -297,6 +292,23 @@ Resources:
                   } 
             - Name: WORDPRESS_DEBUG
               Value: '1'
+          #Secrets:
+          #  - Name: "DatabaseUsername",
+          #    ValueFrom": !sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:DatabaseUsername'
+          #  - Name: "DatabasePassword",
+          #    ValueFrom": !sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:DatabasePassword'
+          MountPoints:
+            - ContainerPath: "/var/www/html"
+              SourceVolume: rexray-ebs-vol
+      Volumes: 
+        - Name: "rexray-ebs-vol"
+          DockerVolumeConfiguration:
+            Autoprovision: true
+            Scope: "shared"
+            Driver: "rexray/ebs"
+            DriverOpts:
+              volumetype: gp2
+              size: "30"
 
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -308,10 +320,10 @@ Resources:
       Protocol: HTTP
       Matcher:
         HttpCode: 200-399
-      HealthCheckIntervalSeconds: 10
+      HealthCheckIntervalSeconds: 300
       HealthCheckPath: '/'
       HealthCheckProtocol: HTTP
-      HealthCheckTimeoutSeconds: 5
+      HealthCheckTimeoutSeconds: 120
       HealthyThresholdCount: 2
       TargetGroupAttributes: 
         - Key: 'stickiness.enabled'
@@ -359,6 +371,7 @@ Resources:
       Role: !Ref ServiceRole
       DesiredCount: !Ref DesiredCount
       TaskDefinition: !Ref TaskDefinition
+      HealthCheckGracePeriodSeconds: 18000
       DeploymentConfiguration:
         MinimumHealthyPercent: 50
       LoadBalancers:
